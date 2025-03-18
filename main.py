@@ -44,7 +44,6 @@ class TestDataset(Dataset):
 
         return image, label
 
-# 4. Определение однослойной нейронной сети
 class PermutationNet(nn.Module):
     def __init__(self, input_size, num_classes):
         super(PermutationNet, self).__init__()
@@ -67,18 +66,16 @@ class PermutationNet(nn.Module):
         y = torch.cat((y1, y2, y3), dim=1)
         y = y.reshape(len(y), 3, 3)
         return y
-# 5. Параметры задачи
+
 n = 9
-image_size = 16  # Размер изображения
+image_size = 16  
 learning_rate = 1e-6
 epochs = 10
 batch_size = 100
-test_batch_size = 100 #  Размер тестовой выборки
+test_batch_size = 100 
 
-# 6. Создание экземпляра модели
 model = PermutationNet(image_size**2, n)
 
-# 7. Определение функции потерь и оптимизатора
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -92,7 +89,6 @@ train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-# 10. Обучение модели
 train_losses = []  # Для хранения loss на обучающей выборке
 test_losses = []   # Для хранения loss на тестовой выборке
 
@@ -122,7 +118,6 @@ for epoch in range(epochs):
         avg_test_loss = running_test_loss / len(test_loader)
         test_losses.append(test_loss.item()) # Записываем loss на тестовой выборке
 
-# 11. Тестирование модели (вывод результатов)
 model.eval()
 
 with torch.no_grad():
@@ -132,7 +127,6 @@ with torch.no_grad():
         print("Predicted:\n", test_output)
         print('-----')
 
-# 12. Визуализация графиков
 plt.figure(figsize=(10, 5))
 plt.plot(train_losses, label='Train Loss')
 plt.plot(test_losses, label='Test Loss')
