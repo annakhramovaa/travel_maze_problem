@@ -1,138 +1,195 @@
+import copy
+import random
+import numpy.linalg.linalg
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from PIL import Image, ImageDraw
-import torchvision.transforms as transforms
-import random
+import math
+import itertools
+from torch.utils.data import TensorDataset, DataLoader, Dataset
 import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader, Dataset
-import os
-import torch.nn.functional as F
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Параметры задачи
+L = 2 # Количество шагов
+n = 5 # Размер матриц перестановок
+batch_size = 32
+learn_rate = 0.001
+num_epochs = 6
+# Генерация датасета
 
-class TestDataset(Dataset):
-    def __init__(self, data_dir, transform=None):
-        self.transform = transform
+def get_key(dictionary, target_value):
+    return next((key for key, value in dictionary.items() if torch.equal(value, target_value)), None)
 
-        self.image_paths = []
-        self.labels = []
+def create_perms(n):
+    perms = list(itertools.permutations(range(n)))
+    return perms
 
-        for img_name in os.listdir(data_dir):
-            self.image_paths.append(os.path.join(data_dir, img_name))
-            l_bracket = self.image_paths[-1].find('[')
-            r_bracket = self.image_paths[-1].find(']')
-            label_str = self.image_paths[-1][l_bracket + 1: r_bracket]
-            label_str = label_str.replace('.', '')
-            targets = list(map(int, label_str.split()))
-            targets = [x - 1 for x in targets]
-            targets = torch.tensor(targets, dtype=torch.int64)
-            targets = F.one_hot(targets, 3)
-            targets = targets.float()
-            self.labels.append(targets)
+def generate_permutation_dataset(perms, n, L):
+    perms = [torch.tensor(p) for p in perms]
+    dataset = []
+    for _ in range(20000):
+        inputs = torch.stack([perms[np.random.randint(len(perms))] for _ in range(L)])
+        targets = inputs[0]
+        for i in range(1, L):
+            targets = inputs[i][targets]
+        dataset.append((inputs, targets))
+    return dataset
 
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        label = self.labels[idx]
-
-        image = Image.open(img_path).convert("1")
-        if self.transform:
-            image = self.transform(image)
-
-        return image, label
-
-class PermutationNet(nn.Module):
-    def __init__(self, input_size, num_classes):
-        super(PermutationNet, self).__init__()
-        self.fc1 = nn.Linear(input_size, 150)
-        self.fc2 = nn.Linear(150, 50)
-        self.fc3 = nn.Linear(50, num_classes)
+class MatrixMultNetwork(nn.Module):
+    def __init__(self, n):
+        self.n = n
+        self.L = L
+        super(MatrixMultNetwork, self).__init__()
+        self.fc1 = nn.Linear(2 * self.n, 3*self.n**2)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(3*self.n**2, self.n)
 
     def forward(self, x):
-        x = x.view(x.shape[0], -1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
+        x = x.view(-1, 2*self.n)
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        x = self.softmax(x)
+        return x
 
-        y1 = x[:, 0:3]
-        y2 = x[:, 3:6]
-        y3 = x[:, 6:9]
-        y1 = F.softmax(y1, dim=1)
-        y2 = F.softmax(y2, dim=1)
-        y3 = F.softmax(y3, dim=1)
-        y = torch.cat((y1, y2, y3), dim=1)
-        y = y.reshape(len(y), 3, 3)
-        return y
+class DeepMatrixNetwork(nn.Module):
+    def __init__(self, n, L):
+        super(DeepMatrixNetwork, self).__init__()
+        self.n = n
+        self.L = L
+        self.fc = nn.ModuleList()
+        for i in range(self.L-1):
+            self.fc.append(nn.Linear(2*self.n, 2*n**4))
+            self.fc.append(nn.Linear(2*self.n**4, self.n))
 
-n = 9
-image_size = 16  
-learning_rate = 1e-6
-epochs = 10
-batch_size = 100
-test_batch_size = 100 
+    def forward(self, x):
+        X, Y = [], []
+        X.append(x[:, :2, :].view(-1, 2*self.n))
+        Y.append(torch.relu(self.fc[0](X[0])))
+        Y[0] = self.fc[1](Y[0])
+        if self.L == 2:
+            return Y[0]
+        for i in range(1, self.L-1):
+            X.append(torch.cat((x[:, i + 1, :], Y[- 1]), dim=1).view(-1, 2 * self.n))
+            Y.append(torch.relu(self.fc[2 * i](X[-1])))
+            Y[i] = self.fc[2 * i + 1](Y[-1])
+        return Y[-1]
 
-model = PermutationNet(image_size**2, n)
+class MatrixDataset(Dataset):
+    def __init__(self, dataset):
+        self.dataset = dataset
 
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        matrices, target = self.dataset[idx]
+        matrices = torch.stack([torch.tensor(matrix, dtype=torch.float32) for matrix in matrices])
+        target = torch.tensor(target, dtype=torch.float32)
+        return matrices, target
+
+train_loss = []   # Для хранения loss на обучающей выборке
+test_loss = []   # Для хранения loss на тестовой выборке
+train_acc = []
+test_acc = []
+
+# Создание датасета
+dataset = generate_permutation_dataset(create_perms(n), n, L)
+matrix_dataset = MatrixDataset(dataset)
+
+# Создание DataLoader
+dataloader = DataLoader(matrix_dataset, batch_size=batch_size, shuffle=False)
+
+# Создание модели
+# shallow_model = MatrixMultNetwork(n).to(device)
+shallow_model = DeepMatrixNetwork(n, L).to(device)
 criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+optimizer = optim.Adam(shallow_model.parameters(), lr=learn_rate, weight_decay=1e-5)
 
-
-dataset = TestDataset(data_dir='D:\\учеба\\maze_problem\\Dataset', transform=transforms.Compose(
-    [transforms.Resize((image_size, image_size)),
-    transforms.ToTensor()]))
-train_size = int(0.80 * len(dataset))
-test_size = len(dataset) - train_size
-train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+# делим датасет на тренировочный и тестовый
+train_size = int(0.80 * len(matrix_dataset))
+test_size = len(matrix_dataset) - train_size
+train_dataset, test_dataset = torch.utils.data.random_split(matrix_dataset, [train_size, test_size])
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-train_losses = []  # Для хранения loss на обучающей выборке
-test_losses = []   # Для хранения loss на тестовой выборке
+start = torch.cuda.Event(enable_timing=True)
+end = torch.cuda.Event(enable_timing=True)
 
-for epoch in range(epochs):
-    model.train()
-    running_loss = 0.0
-    for batch_idx, (data, targets) in enumerate(train_loader):
-        optimizer.zero_grad()  # Обнуляем градиенты
-        outputs = model(data)  # Вычисляем выход
-        loss = criterion(outputs, targets)  # Вычисляем loss
-        loss.backward()  # Обратное распространение ошибки
-        optimizer.step()  # Обновляем веса
-        running_loss += loss.item()  # Записываем loss для обучающей выборки
+start.record()
+# training
+for epoch in range(num_epochs):
 
-    avg_train_loss = running_loss / len(train_loader)
-    train_losses.append(avg_train_loss)
+    shallow_model.train()
+    cur_train_loss = 0
+    cur_test_loss = 0
+    acc_train = 0
+    acc_test = 0
+    for train_inp, train_outp in train_loader:
+        train_inp, train_outp = train_inp.to(device), train_outp.to(device)
+        optimizer.zero_grad()
+        outputs = shallow_model(train_inp)
+        loss = criterion(outputs, train_outp)
+        loss.backward()
+        optimizer.step()
+        cur_train_loss += loss.item()
+        predicted_vectors, pred_ind = torch.sort(outputs, descending=True)
+        true_vectors, true_ind = torch.sort(train_outp, descending=True)
+        accuracy = (pred_ind == true_ind).float().mean()
+        acc_train += accuracy.item()
+    avg_tr_loss = cur_train_loss / len(train_loader)
+    train_loss.append(avg_tr_loss)
+    accuracy_train = acc_train/len(train_loader)
+    train_acc.append(accuracy_train)
+    end.record()
+    torch.cuda.synchronize()  # Ждем завершения всех операций
 
-
-    # Оценка на тестовой выборке
-    running_test_loss = 0.0
+    shallow_model.eval()
     with torch.no_grad():
-        for x, y in test_loader:
-             test_outputs = model(x) # Вычисляем выход на тестовой выборке
-             test_loss = criterion(test_outputs, y)  # Вычисляем loss на тестовой выборке
-             running_test_loss += test_loss.item()
+        for test_inp, test_outp in test_loader:
+            test_inp, test_outp = test_inp.to(device), test_outp.to(device)
+            outputs = shallow_model(test_inp)
+            loss = criterion(outputs, test_outp)
+            cur_test_loss += loss.item()
+            predicted_vectors, pred_ind = torch.sort(outputs, descending=True)
+            true_vectors, true_ind = torch.sort(test_outp, descending=True)
+            accuracy = (pred_ind == true_ind).float().mean()
+            acc_test += accuracy.item()
+    avg_test_loss = cur_test_loss / len(test_loader)
+    test_loss.append(avg_test_loss)
+    accuracy_test = acc_test/len(test_loader)
+    test_acc.append(accuracy_test)
 
-        avg_test_loss = running_test_loss / len(test_loader)
-        test_losses.append(test_loss.item()) # Записываем loss на тестовой выборке
-
-model.eval()
+    # if epoch % 10 == 0:
+    print(f"Epoch {epoch}, Train Loss: {avg_tr_loss:.4f}, Test Loss: {avg_test_loss:.4f}, "
+              f"Train Accuracy: {accuracy_train:.4f}, Test Accuracy: {accuracy_test:.4f}")
 
 with torch.no_grad():
-    for x, y in test_loader:
-        test_output = model(x)
-        print("Original:\n", y)
-        print("Predicted:\n", test_output)
-        print('-----')
+    for test_inp, test_outp in test_loader:
+        test_inp, test_outp = test_inp.to(device), test_outp.to(device)
+        outputs = shallow_model(test_inp)
+        print("predicted matrix", outputs)
+        print("real matrix", test_outp)
 
-plt.figure(figsize=(10, 5))
-plt.plot(train_losses, label='Train Loss')
-plt.plot(test_losses, label='Test Loss')
+print(f"Время выполнения: {start.elapsed_time(end) / 1000:.2f} секунд")
+#  Визуализация графиков
+plt.figure(1, figsize=(10, 5))
+plt.plot(train_loss, label='Train Loss')
+plt.plot(test_loss, label='Test Loss')
 plt.xlabel('Epochs')
 plt.ylabel('Loss')
 plt.title('Training and Test Loss Curve')
+plt.legend()
+plt.grid(True)
+
+plt.figure(2, figsize=(10, 5))
+plt.plot(train_acc, label='Train Accuracy')
+plt.plot(test_acc, label='Test Accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.title('Training and Test Accuracy Curve')
 plt.legend()
 plt.grid(True)
 plt.show()
